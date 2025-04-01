@@ -1,0 +1,46 @@
+name: Test (Linux, macOS)
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+  # Allow manual triggering from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    env:
+      # Make uv use its managed Python (cacheable)
+      UV_PYTHON_PREFERENCE: only-managed
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up uv and Python 3.14
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.14"
+          enable-cache: true
+          cache-python: true
+
+      - name: Install project and dev dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run tests
+        run: uv run python test.py
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Typecheck
+        run: uv run pyright

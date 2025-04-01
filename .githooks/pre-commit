@@ -1,0 +1,8 @@
+#!/bin/sh
+# Pre-commit hook: runs the same checks as CI (.github/workflows/ci.yml).
+# Blocks the commit if any check fails.
+# Tracked copy lives in .githooks/; install with ./.githooks/install-hooks.
+set -e
+uv run python test.py
+uv run ruff check .
+uv run pyright
