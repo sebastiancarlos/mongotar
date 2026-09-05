@@ -3,6 +3,6 @@
 # Blocks the commit if any check fails.
 # Tracked copy lives in .githooks/; install with ./.githooks/install-hooks.
 set -e
-uv run python test.py
+uv run python cover.py
 uv run ruff check .
 uv run pyright

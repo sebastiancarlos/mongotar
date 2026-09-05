@@ -12,10 +12,10 @@ authors = [{ name = "Sebastian Carlos" }]
 Repository = "https://github.com/sebastiancarlos/mongotar"
 
 [project.optional-dependencies]
-dev = ["ruff", "pyright"]
+dev = ["ruff", "pyright", "coverage"]
 
 [project.scripts]
-mongotar = "mongotar.__main__:main"
+mongotar = "mongotar.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -36,3 +36,14 @@ venvPath = "."
 venv = ".venv"
 pythonVersion = "3.14"
 typeCheckingMode = "basic"
+
+[tool.coverage.run]
+branch = true
+source = ["src/mongotar"]
+parallel = true
+patch = ["subprocess"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 90

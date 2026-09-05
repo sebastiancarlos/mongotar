@@ -2,6 +2,7 @@
 
 import logging
 import os
+import socket
 import stat
 import subprocess
 import tempfile
@@ -9,6 +10,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from shutil import rmtree
+from unittest.mock import patch
 
 import mongotar as mongotar_lib
 
@@ -648,6 +650,29 @@ class TestMongotarLib(unittest.TestCase):
             final_content = f.read()
         self.assertEqual(final_content, original_content)
 
+    def test_unit_deserialize_files_skipped_into_dir(self):
+        """An archive entry colliding with an existing directory is skipped."""
+        archive_path = self.test_dir / "dir_collision.mongotar"
+        archive_path.write_text(
+            "--- sub/file.txt --- rw\ncontent\n\n",
+            encoding="utf-8",
+        )
+
+        # Create a *directory* where the archive expects a file.
+        collision = self.deserialize_dir / "sub" / "file.txt"
+        collision.mkdir(parents=True)
+
+        with self.assertLogs(_LOGGER, level=logging.WARNING) as cm:
+            result = mongotar_lib.deserialize(str(archive_path), str(self.deserialize_dir))
+        self.assertTrue(result)
+
+        output = "\n".join(cm.output)
+        self.assertIn("a directory already exists with that name", output)
+        self.assertIn("No files were extracted. 1 file(s) were skipped.", output)
+
+        self.assertTrue(collision.is_dir())
+        self.assertEqual(list(collision.iterdir()), [])
+
     def test_unit_deserialize_force_overwrite(self):
         """Tests that deserialization overwrites with force=True (library)."""
         file1_rel = Path("file_to_overwrite.txt")
@@ -985,6 +1010,258 @@ class TestMongotarLib(unittest.TestCase):
         self.assertTrue(extracted.exists())
         with open(extracted, encoding="utf-8") as f:
             self.assertEqual(f.read(), "line1\nline2")
+
+    def test_unit_serialize_unknown_permission_defaults_to_rw(self):
+        """Files with owner perms outside rw/rwx warn and serialize as rw."""
+        if IS_WINDOWS:
+            self.skipTest("Windows has no executable/permission-bit distinctions")
+        self._create_file("readonly.txt", "content", "r")
+
+        with self.assertLogs(_LOGGER, level=logging.WARNING) as cm:
+            result = mongotar_lib.serialize([str(self.source_dir)], str(self.output_mongotar))
+        self.assertTrue(result)
+
+        output = "\n".join(cm.output)
+        self.assertIn("not directly mapped to", output)
+        self.assertIn("Defaulting to", output)
+        archive = self.output_mongotar.read_text(encoding="utf-8")
+        self.assertIn("readonly.txt --- rw\n", archive)
+
+    def test_unit_serialize_skips_skip_named_files(self):
+        """Files matching SKIP_NAMES (for example .mongotar) are not archived."""
+        self._create_file("data.txt", "keep", "rw")
+        self._create_file(".mtar", "skip me", "rw")
+        self._create_file("a.mongotar", "skip me", "rw")
+
+        with self.assertLogs(_LOGGER, level=logging.DEBUG) as cm:
+            result = mongotar_lib.serialize([str(self.source_dir)], str(self.output_mongotar))
+        self.assertTrue(result)
+
+        output = "\n".join(cm.output)
+        self.assertIn("Skipping entry:", output)
+        archive = self.output_mongotar.read_text(encoding="utf-8")
+        self.assertIn("data.txt", archive)
+        self.assertNotIn(".mtar", archive)
+        self.assertNotIn("a.mongotar", archive)
+
+    def test_unit_serialize_missing_input_skipped(self):
+        """A nonexistent input item is logged and skipped without failing."""
+        self._create_file("keep.txt", "keep", "rw")
+
+        with self.assertLogs(_LOGGER, level=logging.WARNING) as cm:
+            result = mongotar_lib.serialize(
+                [str(self.source_dir / "nope.txt"), str(self.source_dir)],
+                str(self.output_mongotar),
+            )
+        self.assertTrue(result)
+
+        output = "\n".join(cm.output)
+        self.assertIn("not found. Skipping.", output)
+        self.assertIn("nope.txt", output)
+        archive = self.output_mongotar.read_text(encoding="utf-8")
+        self.assertIn("keep.txt", archive)
+        self.assertNotIn("nope.txt", archive)
+
+    def test_unit_serialize_duplicate_input_deduplicated(self):
+        """Passing the same file twice archives it only once."""
+        self._create_file("dup.txt", "content", "rw")
+        item = str(self.source_dir / "dup.txt")
+
+        with self.assertLogs(_LOGGER, level=logging.DEBUG) as cm:
+            result = mongotar_lib.serialize([item, item], str(self.output_mongotar))
+        self.assertTrue(result)
+
+        output = "\n".join(cm.output)
+        self.assertIn("Skipping already seen file:", output)
+        archive = self.output_mongotar.read_text(encoding="utf-8")
+        self.assertEqual(archive.count("dup.txt --- rw\n"), 1)
+
+    def test_unit_serialize_stat_oserror_aborts(self):
+        """A stat() OSError during serialization aborts with the original cause."""
+        if IS_WINDOWS:
+            self.skipTest("Windows returns rw without calling stat()")
+        target = self.source_dir / "file.txt"
+        self._create_file("file.txt", "content", "rw")
+        with patch("pathlib.Path.stat", side_effect=OSError("boom")):
+            with self.assertRaisesRegex(OSError, "Error getting permissions for") as cm:
+                mongotar_lib._get_permission_mode(target)
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+
+    def test_unit_deserialize_chmod_oserror_aborts(self):
+        """A chmod() OSError during deserialization aborts with the original cause."""
+        if IS_WINDOWS:
+            self.skipTest("Windows skips applying permissions")
+        archive_path = self.test_dir / "perm_fail.mongotar"
+        archive_path.write_text("--- file.txt --- rw\ncontent\n\n", encoding="utf-8")
+        with patch("pathlib.Path.chmod", side_effect=OSError("boom")):
+            with self.assertRaisesRegex(OSError, "Error setting permissions for") as cm:
+                mongotar_lib.deserialize(str(archive_path), str(self.deserialize_dir))
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+
+    def test_unit_serialize_binary_read_oserror_aborts(self):
+        """An OSError while sniffing a file for binary content aborts."""
+        self._create_file("file.txt", "content", "rw")
+        real_open = open
+
+        def fake_open(path, mode="r", **kwargs):
+            if mode == "rb":
+                raise OSError("boom")
+            return real_open(path, mode, **kwargs)
+
+        with patch("builtins.open", side_effect=fake_open):
+            with self.assertRaisesRegex(OSError, "Could not read") as cm:
+                mongotar_lib.serialize([str(self.source_dir)], str(self.output_mongotar))
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+
+    def test_unit_serialize_utf8_read_oserror_aborts(self):
+        """An OSError while reading a file's content aborts."""
+        self._create_file("file.txt", "content", "rw")
+        real_open = open
+
+        def fake_open(path, mode="r", **kwargs):
+            if mode == "r":
+                raise OSError("boom")
+            return real_open(path, mode, **kwargs)
+
+        with patch("builtins.open", side_effect=fake_open):
+            with self.assertRaisesRegex(OSError, "Error reading file") as cm:
+                mongotar_lib.serialize([str(self.source_dir)], str(self.output_mongotar))
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+
+    def test_unit_serialize_invalid_utf8_skipped(self):
+        """A file that fails UTF-8 decoding is treated as binary and skipped."""
+        self._create_file("good.txt", "keep", "rw")
+        binary = self.source_dir / "bad.dat"
+        binary.write_bytes(b"Some text then \xc3\x28 invalid utf-8.")
+
+        with self.assertLogs(_LOGGER, level=logging.WARNING) as cm:
+            result = mongotar_lib.serialize([str(self.source_dir)], str(self.output_mongotar))
+        self.assertTrue(result)
+
+        output = "\n".join(cm.output)
+        self.assertIn("bad.dat", output)
+        self.assertIn("appears to be binary", output)
+        archive = self.output_mongotar.read_text(encoding="utf-8")
+        self.assertIn("good.txt", archive)
+        self.assertNotIn("bad.dat", archive)
+
+    def test_unit_serialize_skips_socket_during_traversal(self):
+        """A unix domain socket encountered during traversal is skipped."""
+        self._create_file("keep.txt", "keep", "rw")
+        socket_path = self.source_dir / "listen.sock"
+
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(str(socket_path))
+        try:
+            with self.assertLogs(_LOGGER, level=logging.DEBUG) as cm:
+                result = mongotar_lib.serialize([str(self.source_dir)], str(self.output_mongotar))
+        finally:
+            sock.close()
+
+        self.assertTrue(result)
+        output = "\n".join(cm.output)
+        self.assertIn("Skipping non-file/non-directory item:", output)
+        self.assertIn("listen.sock", output)
+        archive = self.output_mongotar.read_text(encoding="utf-8")
+        self.assertIn("keep.txt", archive)
+        self.assertNotIn("listen.sock", archive)
+
+    def test_unit_serialize_gitignore_oserror_aborts(self):
+        """An OSError reading a traversal .gitignore aborts with the cause."""
+        gi = self._create_file(Path(".gitignore"), "*.log\n")
+        self._create_file("keep.txt", "keep", "rw")
+        real_open = open
+
+        def fake_open(path, mode="r", **kwargs):
+            if Path(path).resolve() == gi.resolve():
+                raise OSError("boom")
+            return real_open(path, mode, **kwargs)
+
+        with patch("builtins.open", side_effect=fake_open):
+            with self.assertRaisesRegex(OSError, "Could not read ignore file") as cm:
+                mongotar_lib.serialize(
+                    [str(self.source_dir)], str(self.output_mongotar), exclude_vcs=True
+                )
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+
+    def test_unit_serialize_ancestor_gitignore_oserror_aborts(self):
+        """An OSError reading an ancestor .gitignore aborts with the cause."""
+        (self.test_dir / ".git").mkdir()
+        gi = self.test_dir / ".gitignore"
+        gi.write_text("*.tmp\n", encoding="utf-8")
+        self._create_file("keep.txt", "keep", "rw")
+        real_open = open
+
+        def fake_open(path, mode="r", **kwargs):
+            if Path(path).resolve() == gi.resolve():
+                raise OSError("boom")
+            return real_open(path, mode, **kwargs)
+
+        with _chdir(self.source_base), patch("builtins.open", side_effect=fake_open):
+            with self.assertRaisesRegex(OSError, "Could not read ignore file") as cm:
+                mongotar_lib.serialize(
+                    [PROJECT_DIR_NAME], str(self.output_mongotar), exclude_vcs=True
+                )
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+
+    def test_unit_serialize_output_open_oserror_aborts(self):
+        """An OSError opening the output file aborts with the cause."""
+        self._create_file("keep.txt", "keep", "rw")
+        real_open = open
+
+        def fake_open(path, mode="r", **kwargs):
+            if mode == "w":
+                raise OSError("boom")
+            return real_open(path, mode, **kwargs)
+
+        with patch("builtins.open", side_effect=fake_open):
+            with self.assertRaisesRegex(OSError, "Error opening output file") as cm:
+                mongotar_lib.serialize([str(self.source_dir)], str(self.output_mongotar))
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+
+    def test_unit_deserialize_archive_open_oserror_aborts(self):
+        """An OSError opening the archive aborts with the cause."""
+        archive_path = self.test_dir / "unreadable.mongotar"
+        archive_path.write_text("--- file.txt --- rw\ncontent\n\n", encoding="utf-8")
+        real_open = open
+
+        def fake_open(path, mode="r", **kwargs):
+            if Path(path).resolve() == archive_path.resolve():
+                raise OSError("boom")
+            return real_open(path, mode, **kwargs)
+
+        with patch("builtins.open", side_effect=fake_open):
+            with self.assertRaisesRegex(OSError, "Could not read archive") as cm:
+                mongotar_lib.deserialize(str(archive_path), str(self.deserialize_dir))
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+
+    def test_unit_deserialize_mkdir_oserror_aborts(self):
+        """An OSError creating an output directory aborts with the cause."""
+        archive_path = self.test_dir / "mk_fail.mongotar"
+        archive_path.write_text("--- sub/file.txt --- rw\ncontent\n\n", encoding="utf-8")
+        self.deserialize_dir.mkdir(parents=True)
+        (self.deserialize_dir / "sub").write_text("blocks a file here", encoding="utf-8")
+
+        with self.assertRaisesRegex(OSError, "Error creating or writing file") as cm:
+            mongotar_lib.deserialize(str(archive_path), str(self.deserialize_dir))
+        self.assertIsInstance(cm.exception.__cause__, OSError)
+
+    def test_unit_deserialize_write_oserror_aborts(self):
+        """An OSError writing an extracted file aborts with the cause."""
+        archive_path = self.test_dir / "write_fail.mongotar"
+        archive_path.write_text("--- file.txt --- rw\ncontent\n\n", encoding="utf-8")
+        target = self.deserialize_dir / "file.txt"
+        real_open = open
+
+        def fake_open(path, mode="r", **kwargs):
+            if mode == "w" and Path(path).resolve() == target.resolve():
+                raise OSError("boom")
+            return real_open(path, mode, **kwargs)
+
+        with patch("builtins.open", side_effect=fake_open):
+            with self.assertRaisesRegex(OSError, "Error creating or writing file") as cm:
+                mongotar_lib.deserialize(str(archive_path), str(self.deserialize_dir))
+        self.assertIsInstance(cm.exception.__cause__, OSError)
 
 
 # ---
@@ -1360,6 +1637,38 @@ class TestMongotarCLI(unittest.TestCase):
             if archive_in_test.exists():
                 archive_in_test.unlink()
 
+    def test_cli_no_arguments_shows_help(self):
+        """Running mongotar with no arguments prints help and exits non-zero."""
+        result = self._run_mongotar([], cwd=str(self.test_dir))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("usage:", result.stderr)
+        self.assertIn("input", result.stderr)
+        self.assertIn("output", result.stderr)
+
+    def test_cli_deserialize_requires_single_input(self):
+        """Deserialization with more than one input archive is rejected."""
+        self._create_file("a.txt", "a", "rw")
+        self._create_file("b.txt", "b", "rw")
+        result = self._run_mongotar(
+            [
+                "-d",
+                str(self.source_dir / "a.txt"),
+                str(self.source_dir / "b.txt"),
+                str(self.dest_dir),
+            ]
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Deserialization (-d) requires exactly one input", result.stderr)
+
+    def test_cli_deserialize_output_cannot_be_stdout(self):
+        """Deserializing to '-' is rejected since it is a serialization idiom."""
+        self._create_file("a.txt", "a", "rw")
+        res_ser = self._run_mongotar([str(self.source_dir), str(self.archive_file)])
+        self.assertEqual(res_ser.returncode, 0, f"CLI failed:\n{res_ser.stderr}")
+        result = self._run_mongotar(["-d", str(self.archive_file), "-"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("output cannot be stdout", result.stderr)
+
     def test_cli_serialize_is_default_mode(self):
         """Serialize is assumed when no mode flag is passed."""
         file_rel = Path("data") / "file1.txt"
@@ -1410,6 +1719,29 @@ class TestMongotarCLI(unittest.TestCase):
             extracted = self.dest_dir / source_dir_archive / rel
             with open(extracted, encoding="utf-8") as f:
                 self.assertEqual(f.read(), content)
+
+    def test_cli_unexpected_error_prints_error_line(self):
+        """A failing serialize surfaces one Error line on stderr and exits 1."""
+        self._create_file("keep.txt", "keep", "rw")
+        # A directory as the output file makes open(output, "w") raise IsADirectoryError.
+        self.dest_dir.mkdir()
+
+        result = self._run_mongotar([str(self.source_dir), str(self.dest_dir)])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Error opening output file", result.stderr)
+        self.assertIn("Error:", result.stderr)
+
+    def test_cli_unexpected_error_verbose_prints_traceback(self):
+        """With -v, a failing serialize prints a full traceback on stderr."""
+        self._create_file("keep.txt", "keep", "rw")
+        self.dest_dir.mkdir()
+
+        result = self._run_mongotar(["-v", str(self.source_dir), str(self.dest_dir)])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Traceback (most recent call last)", result.stderr)
+        self.assertIn("Error opening output file", result.stderr)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import stat
 import sys
 from enum import StrEnum, auto
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, assert_never
 
 from pathspec import GitIgnoreSpec
 
@@ -59,8 +59,7 @@ def _get_permission_mode(item_path: Path) -> Permission:
     try:
         st = item_path.stat()
     except OSError as e:
-        logger.error(f"Error getting permissions for {item_path}: {e}")
-        raise e
+        raise OSError(f"Error getting permissions for {item_path}: {e}") from e
 
     # state.filemode() returns strings like '-rwxrwxrwx'. The range 1:4 is the
     # owner's permissions.
@@ -90,21 +89,25 @@ def _apply_permissions(filepath: Path, permission_mode_str: Permission) -> None:
             target_mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
         case Permission.RW:
             target_mode = stat.S_IRUSR | stat.S_IWUSR
+        case _ as unreachable:  # pragma: no cover
+            assert_never(unreachable)
 
     try:
         logger.debug(f"Applying permissions ({permission_mode_str}) to: {filepath}")
         filepath.chmod(target_mode)
-    except Exception as e:
-        logger.error(f"Error setting permissions for {filepath}: {e}")
-        raise e
+    except OSError as e:
+        raise OSError(f"Error setting permissions for {filepath}: {e}") from e
 
 
 def _serialize_file(
     item_path: Path,
     output_file_handle: TextIO,
     root_dir: Path,
-) -> None:
-    """Serializes a file (not dir) to an open file handle."""
+) -> bool:
+    """Serializes a file (not dir) to an open file handle.
+
+    Returns True if the file was written to the archive.
+    """
 
     abs_item_path = item_path.resolve()
 
@@ -116,12 +119,12 @@ def _serialize_file(
     try:
         with open(item_path, "rb") as fb:
             chunk = fb.read(4096)
-            if b"\x00" in chunk:
-                logger.warning(f"File '{relative_path}' appears to be binary and will be skipped.")
-                return
     except OSError as e:
-        logger.warning(f"Could not read {item_path}: {e}")
-        raise
+        raise OSError(f"Could not read {item_path}: {e}") from e
+
+    if b"\x00" in chunk:
+        logger.warning(f"File '{relative_path}' appears to be binary and will be skipped.")
+        return False
 
     logger.debug(f"Adding: {relative_path}")
 
@@ -131,9 +134,11 @@ def _serialize_file(
     try:
         with open(item_path, encoding="utf-8", errors="strict") as infile:
             content = infile.read()
+    except UnicodeDecodeError:
+        logger.warning(f"File '{relative_path}' appears to be binary and will be skipped.")
+        return False
     except OSError as e:
-        logger.error(f"Error reading file {item_path}: {e}")
-        raise
+        raise OSError(f"Error reading file {item_path}: {e}") from e
 
     for line in content.splitlines(keepends=False):
         if HEADER_LINE_RE.match(line):
@@ -142,7 +147,7 @@ def _serialize_file(
                 f" archive header format and will be skipped to avoid"
                 f" corruption: {line!r}"
             )
-            return
+            return False
 
     # Write header and content to the file handle
     output_file_handle.write(f"--- {relative_path} --- {permission_mode}\n")
@@ -150,6 +155,7 @@ def _serialize_file(
 
     # Add separation (two newlines)
     output_file_handle.write("\n\n")
+    return True
 
 
 def _serialize_item(
@@ -160,11 +166,14 @@ def _serialize_item(
     exclude_vcs: bool = False,
     ignore_specs: list[IgnoreSpec] = [],
     excludes: list[str] = [],
-) -> None:
-    """Serializes a single item (file/dir) to an open file handle."""
+) -> int:
+    """Serializes a single item (file/dir) to an open file handle.
+
+    Returns the number of files written to the archive for this item.
+    """
     if item_path.is_symlink():
         logger.debug(f"Skipping link: {item_path}")
-        return
+        return 0
 
     abs_item_path = item_path.resolve()
 
@@ -172,15 +181,15 @@ def _serialize_item(
     # discovered during traversal alike (like GNU tar's --exclude).
     if _is_excluded(abs_item_path, root_dir, excludes):
         logger.debug(f"Skipping excluded entry: {item_path}")
-        return
+        return 0
 
     if abs_item_path in processed_paths:
         logger.debug(f"Skipping already seen file: {item_path}")
-        return
+        return 0
     processed_paths.add(abs_item_path)
 
     if item_path.is_file():
-        _serialize_file(item_path, output_file_handle, root_dir)
+        return int(_serialize_file(item_path, output_file_handle, root_dir))
     elif item_path.is_dir():
         # Ensure consistent order
         entries = sorted(item_path.iterdir())
@@ -195,8 +204,9 @@ def _serialize_item(
                         child_specs.append((abs_item_path, GitIgnoreSpec.from_lines(fh)))
                     logger.debug(f"Applying ignore file: {ignore_file.relative_to(root_dir)}")
                 except OSError as e:
-                    logger.debug(f"Could not read ignore file {ignore_file}: {e}")
+                    raise OSError(f"Could not read ignore file {ignore_file}: {e}") from e
 
+        written_count = 0
         for entry_path in entries:
             if any(re.search(p, entry_path.name) for p in SKIP_NAMES):
                 logger.debug(f"Skipping entry: {entry_path}")
@@ -212,7 +222,7 @@ def _serialize_item(
                 continue
 
             # Recursive call
-            _serialize_item(
+            written_count += _serialize_item(
                 entry_path,
                 output_file_handle,
                 root_dir=root_dir,
@@ -221,9 +231,11 @@ def _serialize_item(
                 ignore_specs=child_specs,
                 excludes=excludes,
             )
+        return written_count
     else:
         # Ignore sockets, etc.
         logger.debug(f"Skipping non-file/non-directory item: {item_path}")
+        return 0
 
 
 def _is_ignored(entry_path: Path, ignore_specs: list[IgnoreSpec]) -> bool:
@@ -233,10 +245,7 @@ def _is_ignored(entry_path: Path, ignore_specs: list[IgnoreSpec]) -> bool:
     the path wins.
     """
     for base_dir, spec in reversed(ignore_specs):
-        try:
-            rel = entry_path.relative_to(base_dir).as_posix()
-        except ValueError:
-            continue
+        rel = entry_path.relative_to(base_dir).as_posix()
 
         if any(p.match_file(rel) for p in spec.patterns):
             return spec.match_file(rel)
@@ -311,7 +320,7 @@ def _load_ancestor_gitignores(item: Path) -> list[IgnoreSpec]:
                     specs.append((current, spec))
                 logger.debug(f"Applying ancestor ignore file: {ignore_file}")
             except OSError as e:
-                logger.debug(f"Could not read ignore file {ignore_file}: {e}")
+                raise OSError(f"Could not read ignore file {ignore_file}: {e}") from e
         # Stop at the repository root
         if (current / ".git").exists():
             found_repo_root = True
@@ -361,7 +370,10 @@ def serialize(
         target = sys.stdout
     else:
         assert output_path is not None
-        target = open(output_path, "w", encoding="utf-8")
+        try:
+            target = open(output_path, "w", encoding="utf-8")
+        except OSError as e:
+            raise OSError(f"Error opening output file '{output_path}': {e}") from e
 
     # Keep list of (absolute) processed paths.
     # Ensure the output file is never processed.
@@ -369,15 +381,13 @@ def serialize(
     if output_path is not None:
         processed_paths.add(output_path)
 
-    wrote_any = False
+    files_written = 0
     with target as f:
         for item in input_items:
             abs_item = Path(item).resolve()
             if not abs_item.exists():
                 logger.warning(f"Input item '{item}' not found. Skipping.")
                 continue
-
-            before_item_count = len(processed_paths)
 
             # Archive paths are stored relative to a root, like `tar`:
             # relative inputs relative to CWD, absolute inputs relative
@@ -404,7 +414,7 @@ def serialize(
             if exclude_vcs and abs_item.is_dir():
                 seed_specs = _load_ancestor_gitignores(abs_item)
 
-            _serialize_item(
+            files_written += _serialize_item(
                 abs_item,
                 f,
                 root_dir=root_dir,
@@ -413,24 +423,12 @@ def serialize(
                 ignore_specs=seed_specs,
                 excludes=excludes,
             )
-            after_item_count = len(processed_paths)
-
-            # Check if we actually processed anything new
-            if after_item_count > before_item_count:
-                wrote_any = True
 
     # Do final checks *after* closing the file handle
-    if not wrote_any:
+    if files_written == 0:
         logger.warning("No valid input items found to serialize.")
         return False
 
-    if not to_stdout:
-        assert output_path is not None
-        if not (output_path.exists() and output_path.stat().st_size > 0):
-            logger.warning(
-                f"Output file '{output_file}' is empty or contains no file content"
-                " despite processing inputs. Check input files and permissions."
-            )
     logger.info(f"Successfully serialized items to '{output_file}'")
     return True
 
@@ -459,7 +457,11 @@ def deserialize(input_file: str, output_folder: str, force: bool = False) -> boo
 
     Path(output_folder).mkdir(parents=True, exist_ok=True)
 
-    with open(input_file, encoding="utf-8") as f:
+    try:
+        source = open(input_file, encoding="utf-8")
+    except OSError as e:
+        raise OSError(f"Could not read archive '{input_file}': {e}") from e
+    with source as f:
         current_line = f.readline()
         line_num = 1
 
@@ -492,8 +494,7 @@ def deserialize(input_file: str, output_folder: str, force: bool = False) -> boo
         while current_line:
             # extract header info
             match = header_re.match(current_line)
-            if not match:
-                raise ValueError(f"Expected header, got: {current_line!r}")
+            assert match is not None
             output_path_rel, output_perms = match.group(1).strip(), match.group(2)
             current_filepath_abs = (abs_output_folder / output_path_rel).resolve()
 
@@ -508,6 +509,7 @@ def deserialize(input_file: str, output_folder: str, force: bool = False) -> boo
                     f" '{output_path_rel}' resolves outside output directory"
                     f" '{output_folder}'"
                 )
+                files_skipped_count += 1
                 skip_to_next_header()
                 continue
 
@@ -539,47 +541,36 @@ def deserialize(input_file: str, output_folder: str, force: bool = False) -> boo
 
             try:
                 current_filepath_abs.parent.mkdir(parents=True, exist_ok=True)
-                files_extracted_count += 1
-            except OSError as e:
-                logger.error(
-                    f"Error creating directory or opening file for '{current_filepath_abs}': {e}"
-                )
-                files_skipped_count += 1
-                skip_to_next_header()
-                continue
 
-            # Write lines
-            with open(current_filepath_abs, "w", encoding="utf-8") as o:
-                # The format appends a fixed "\n\n" separator after every entry, so
-                # the last two newlines we read belong to that separator (not the
-                # content) and must be dropped. So we 'held' some content
-                held = ""
-                while current_line and not header_re.match(current_line):
-                    if current_line == "\n":
-                        held += "\n"
-                    else:
-                        # Every non-blank line read here ends with "\n", which
-                        # is ambiduous. It may be content or the start of the
-                        # separator. So we move it to 'held'.
-                        o.write(held + current_line[:-1])
-                        held = "\n"
-                    current_line = f.readline()
-                    line_num += 1
-                if held:
+                # Write lines
+                with open(current_filepath_abs, "w", encoding="utf-8") as o:
+                    # The format appends a fixed "\n\n" separator after every entry, so
+                    # the last two newlines we read belong to that separator (not the
+                    # content) and must be dropped. So we 'held' some content
+                    held = ""
+                    while current_line and not header_re.match(current_line):
+                        if current_line == "\n":
+                            held += "\n"
+                        else:
+                            # Every non-blank line read here ends with "\n", which
+                            # is ambiguous. It may be content or the start of the
+                            # separator. So we move it to 'held'.
+                            o.write(held + current_line[:-1])
+                            held = "\n"
+                        current_line = f.readline()
+                        line_num += 1
                     o.write(held[:-2])
+            except OSError as e:
+                raise OSError(
+                    f"Error creating or writing file '{current_filepath_abs}': {e}"
+                ) from e
+
+            files_extracted_count += 1
 
             _apply_permissions(current_filepath_abs, Permission(output_perms))
 
-    if files_extracted_count == 0 and files_skipped_count == 0:
-        logger.warning(
-            f"Input archive '{input_file}' appears to be empty or contained"
-            " no processable file entries."
-        )
-    elif files_extracted_count == 0 and files_skipped_count > 0:
-        logger.warning(
-            f"No files were extracted. {files_skipped_count} file(s) existed"
-            " and were skipped (use -f to overwrite)."
-        )
+    if files_extracted_count == 0 and files_skipped_count > 0:
+        logger.warning(f"No files were extracted. {files_skipped_count} file(s) were skipped.")
 
     logger.info(f"Successfully deserialized '{input_file}' to '{output_folder}'")
     return True

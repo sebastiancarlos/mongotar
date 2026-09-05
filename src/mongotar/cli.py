@@ -125,9 +125,5 @@ def main() -> None:
         if args.verbose:
             traceback.print_exc()
         else:
-            print(f"Error: An unexpected error occurred: {e}", file=sys.stderr)
+            print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
