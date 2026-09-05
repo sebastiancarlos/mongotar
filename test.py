@@ -928,10 +928,7 @@ class TestMongotarLib(unittest.TestCase):
         target_rel = Path("real_target.txt")
         link_rel = Path("link_to_target.txt")
         self._create_file(target_rel, "real content", "rw")
-        try:
-            (self.source_dir / link_rel).symlink_to(self.source_dir / target_rel)
-        except OSError:
-            self.skipTest("OS refused symlink creation")
+        (self.source_dir / link_rel).symlink_to(self.source_dir / target_rel)
 
         orig_cwd = Path.cwd()
         try:
