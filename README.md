@@ -7,6 +7,7 @@
 </p>
 
 ![Test (Linux, macOS, Windows)](https://github.com/sebastiancarlos/mongotar/actions/workflows/ci.yml/badge.svg)
+[![PyPI](https://img.shields.io/pypi/v/mongotar.svg)](https://pypi.org/project/mongotar/)
 [![PyPI version](https://img.shields.io/pypi/v/mongotar)](https://pypi.org/project/mongotar/)
 [![License: MIT](https://img.shields.io/pypi/l/mongotar)](https://github.com/sebastiancarlos/mongotar/blob/main/LICENSE)
 
@@ -147,13 +148,21 @@ Running `mongotar -d -f my_project.mongotar .` recreates the same tree, with
 
 ## Installation
 
+Requires Python 3.14+.
+
+```bash
+pip install mongotar
+```
+
+After installation, the `mongotar` command will be available in your `PATH`.
+
+Or from source:
+
 ```bash
 git clone https://github.com/sebastiancarlos/mongotar
 cd mongotar
 uv tool install .
 ```
-
-After installation, the `mongotar` command will be available in your `PATH`.
 
 ## Usage (`mongotar` CLI)
 
