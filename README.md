@@ -6,7 +6,7 @@
 <img width="400" alt="mongotar logo" src="https://github.com/user-attachments/assets/2da3c48a-1151-4281-99ec-930e093c7678" />
 </p>
 
-![CI](https://github.com/sebastiancarlos/mongotar/actions/workflows/ci.yml/badge.svg)
+![Test (Linux, macOS, Windows)](https://github.com/sebastiancarlos/mongotar/actions/workflows/ci.yml/badge.svg)
 
 A simple tool for serializing _and deserializing_ files (with permissions and
 `.gitignore` exclusion) into a human-readable text file.

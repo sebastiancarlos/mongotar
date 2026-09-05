@@ -1,4 +1,4 @@
-name: Test (Linux, macOS)
+name: Test (Linux, macOS, Windows)
 
 on:
   push:
