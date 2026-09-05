@@ -1,6 +1,6 @@
 [project]
 name = "mongotar"
-version = "0.1.0"
+version = "0.1.1"
 description = "Serialize directory structures with basic permissions into human-readable text files"
 readme = "README.md"
 license = "MIT"
