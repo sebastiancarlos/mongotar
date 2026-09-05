@@ -8,7 +8,6 @@
 
 ![Test (Linux, macOS, Windows)](https://github.com/sebastiancarlos/mongotar/actions/workflows/ci.yml/badge.svg)
 [![PyPI version](https://img.shields.io/pypi/v/mongotar)](https://pypi.org/project/mongotar/)
-[![Python versions](https://img.shields.io/pypi/pyversions/mongotar)](https://pypi.org/project/mongotar/)
 [![License: MIT](https://img.shields.io/pypi/l/mongotar)](https://github.com/sebastiancarlos/mongotar/blob/main/LICENSE)
 
 A simple tool for serializing _and deserializing_ files (with permissions and
