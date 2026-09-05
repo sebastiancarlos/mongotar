@@ -62,7 +62,19 @@ def _cmd(*args: str) -> list[str]:
     local = ROOT / ".venv" / "bin" / "mongotar"
     if local.is_file():
         return [str(local), *args]
+    local_exe = ROOT / ".venv" / "Scripts" / "mongotar.exe"
+    if local_exe.is_file():
+        return [str(local_exe), *args]
     return ["uv", "run", "mongotar", *args]
+
+
+IS_WINDOWS = os.name == "nt"
+
+RWX = "rw" if IS_WINDOWS else "rwx"
+
+
+def _strip_anchor(path: Path) -> Path:
+    return path.relative_to(path.anchor)
 
 
 @contextmanager
@@ -115,13 +127,13 @@ class TestMongotarLib(unittest.TestCase):
         self._create_file(file1_rel, file1_content, "rw")
         self._create_file(exec_rel, exec_content, "rwx")
 
-        source_dir_archive = self.source_dir.relative_to("/")
+        source_dir_archive = _strip_anchor(self.source_dir)
 
         # Expected content - note the path separators are always '/'
         # Order should be deterministic (sorted)
         expected_serialized = (
             f"--- {source_dir_archive.as_posix()}/{exec_rel.as_posix()}"
-            f" --- rwx\n{exec_content}\n\n"
+            f" --- {RWX}\n{exec_content}\n\n"
             f"--- {source_dir_archive.as_posix()}/{file1_rel.as_posix()}"
             f" --- rw\n{file1_content}\n\n"
         )
@@ -154,7 +166,7 @@ class TestMongotarLib(unittest.TestCase):
 
         # Verify permissions (allow for slight variations if OS adds group bits, focus on user)
         self.assertEqual(_get_simple_permissions(str(deser_file1)), "rw")
-        self.assertEqual(_get_simple_permissions(str(deser_exec)), "rwx")
+        self.assertEqual(_get_simple_permissions(str(deser_exec)), RWX)
 
     def test_unit_roundtrip_preserves_exact_content(self):
         """Round-trip must reproduce file content byte-for-byte.
@@ -182,7 +194,7 @@ class TestMongotarLib(unittest.TestCase):
         result = mongotar_lib.deserialize(str(self.output_mongotar), str(self.deserialize_dir))
         self.assertTrue(result)
 
-        source_dir_archive = self.source_dir.relative_to("/")
+        source_dir_archive = _strip_anchor(self.source_dir)
 
         for rel_path, content in cases:
             with self.subTest(content=repr(content)):
@@ -208,7 +220,7 @@ class TestMongotarLib(unittest.TestCase):
         with open(self.output_mongotar, encoding="utf-8") as f:
             archive = f.read()
 
-        source_dir_archive = self.source_dir.relative_to("/")
+        source_dir_archive = _strip_anchor(self.source_dir)
 
         for rel_path, content in cases:
             with self.subTest(content=repr(content)):
@@ -556,7 +568,7 @@ class TestMongotarLib(unittest.TestCase):
         file1_rel = Path("a.txt")
         self._create_file(file1_rel, "content a", "rw")
 
-        source_dir_archive = self.source_dir.relative_to("/")
+        source_dir_archive = _strip_anchor(self.source_dir)
 
         with self.assertLogs(_LOGGER, level=logging.DEBUG) as cm:
             mongotar_lib.serialize([str(self.source_dir)], str(self.output_mongotar))
@@ -588,7 +600,7 @@ class TestMongotarLib(unittest.TestCase):
             [str(self.source_dir)], str(self.output_mongotar)
         )  # Create archive first
 
-        source_dir_archive = self.source_dir.relative_to("/")
+        source_dir_archive = _strip_anchor(self.source_dir)
 
         with self.assertLogs(_LOGGER, level=logging.DEBUG) as cm:
             mongotar_lib.deserialize(str(self.output_mongotar), str(self.deserialize_dir))
@@ -597,7 +609,8 @@ class TestMongotarLib(unittest.TestCase):
 
         expected_path_abs = (self.deserialize_dir / source_dir_archive / file1_rel).resolve()
         self.assertIn(f"Extracting: {expected_path_abs}", output)
-        self.assertIn(f"Applying permissions (rw) to: {expected_path_abs}", output)
+        if not IS_WINDOWS:
+            self.assertIn(f"Applying permissions (rw) to: {expected_path_abs}", output)
 
     def test_unit_deserialize_no_overwrite_default(self):
         """Tests that deserialization skips existing files by default (library)."""
@@ -610,7 +623,7 @@ class TestMongotarLib(unittest.TestCase):
         mongotar_lib.serialize([str(archive_source_path)], str(self.output_mongotar))
         archive_source_path.unlink()  # Remove the source used for archive creation
 
-        source_archive_path = archive_source_path.relative_to("/")
+        source_archive_path = _strip_anchor(archive_source_path)
 
         # Create the target file *before* deserializing
         target_file_path = self.deserialize_dir / source_archive_path
@@ -646,7 +659,7 @@ class TestMongotarLib(unittest.TestCase):
         mongotar_lib.serialize([str(archive_source_path)], str(self.output_mongotar))
         archive_source_path.unlink()
 
-        source_archive_path = archive_source_path.relative_to("/")
+        source_archive_path = _strip_anchor(archive_source_path)
 
         # Create the target file *before* deserializing
         target_file_path = self.deserialize_dir / source_archive_path
@@ -915,7 +928,10 @@ class TestMongotarLib(unittest.TestCase):
         target_rel = Path("real_target.txt")
         link_rel = Path("link_to_target.txt")
         self._create_file(target_rel, "real content", "rw")
-        (self.source_dir / link_rel).symlink_to(self.source_dir / target_rel)
+        try:
+            (self.source_dir / link_rel).symlink_to(self.source_dir / target_rel)
+        except OSError:
+            self.skipTest("OS refused symlink creation")
 
         orig_cwd = Path.cwd()
         try:
@@ -1022,7 +1038,7 @@ class TestMongotarCLI(unittest.TestCase):
         self._create_file(file1_rel, "Data 1", "rw")
         self._create_file(exec_rel, "echo run", "rwx")
 
-        source_dir_archive = self.source_dir.relative_to("/")
+        source_dir_archive = _strip_anchor(self.source_dir)
 
         # Serialize Verbose
         result_ser = self._run_mongotar(["-v", str(self.source_dir), str(self.archive_file)])
@@ -1048,9 +1064,11 @@ class TestMongotarCLI(unittest.TestCase):
         self.assertTrue(abs_dest_exec.exists())
         # Check for key verbose messages on stderr (diagnostics)
         self.assertIn(f"Extracting: {abs_dest_file1}", result_des.stderr)
-        self.assertIn(f"Applying permissions (rw) to: {abs_dest_file1}", result_des.stderr)
+        if not IS_WINDOWS:
+            self.assertIn(f"Applying permissions (rw) to: {abs_dest_file1}", result_des.stderr)
         self.assertIn(f"Extracting: {abs_dest_exec}", result_des.stderr)
-        self.assertIn(f"Applying permissions (rwx) to: {abs_dest_exec}", result_des.stderr)
+        if not IS_WINDOWS:
+            self.assertIn(f"Applying permissions (rwx) to: {abs_dest_exec}", result_des.stderr)
         self.assertIn("Successfully deserialized", result_des.stderr)
 
     def test_cli_deserialize_no_overwrite_default(self):
@@ -1066,7 +1084,7 @@ class TestMongotarCLI(unittest.TestCase):
         self.assertEqual(result_ser.returncode, 0)
         abs_source_file.unlink()  # Clean up source
 
-        source_archive_path = abs_source_file.relative_to("/")
+        source_archive_path = _strip_anchor(abs_source_file)
 
         # Create existing file in destination
         dest_file_path = self.dest_dir / source_archive_path
@@ -1105,7 +1123,7 @@ class TestMongotarCLI(unittest.TestCase):
         self.assertEqual(result_ser.returncode, 0)
         abs_source_file.unlink()  # Clean up source
 
-        source_archive_path = abs_source_file.relative_to("/")
+        source_archive_path = _strip_anchor(abs_source_file)
 
         # Create existing file in destination
         dest_file_path = self.dest_dir / source_archive_path
@@ -1250,7 +1268,7 @@ class TestMongotarCLI(unittest.TestCase):
         res_ser = self._run_mongotar([str(self.source_dir), str(self.archive_file)])
         self.assertEqual(res_ser.returncode, 0, f"CLI failed:\n{res_ser.stderr}")
 
-        source_dir_archive = self.source_dir.relative_to("/")
+        source_dir_archive = _strip_anchor(self.source_dir)
         self.dest_dir.mkdir(parents=True, exist_ok=True)
         result = self._run_mongotar(["-d", str(self.archive_file), "."], cwd=str(self.dest_dir))
         self.assertEqual(result.returncode, 0, f"CLI deserialize failed:\n{result.stderr}")
@@ -1277,8 +1295,8 @@ class TestMongotarCLI(unittest.TestCase):
         binary_file_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
         abs_text_file = self.source_dir / text_file_rel
-        text_archive_path = abs_text_file.relative_to("/")
-        binary_archive_path = binary_file_path.relative_to("/")
+        text_archive_path = _strip_anchor(abs_text_file)
+        binary_archive_path = _strip_anchor(binary_file_path)
 
         # Run serialize, include both files
         result_ser = self._run_mongotar(
@@ -1390,7 +1408,7 @@ class TestMongotarCLI(unittest.TestCase):
         res_des = self._run_mongotar(["-d", str(stdout_archive), str(self.dest_dir)])
         self.assertEqual(res_des.returncode, 0, f"CLI deserialize failed:\n{res_des.stderr}")
 
-        source_dir_archive = self.source_dir.relative_to("/")
+        source_dir_archive = _strip_anchor(self.source_dir)
         for rel, content in contents.items():
             extracted = self.dest_dir / source_dir_archive / rel
             with open(extracted, encoding="utf-8") as f:

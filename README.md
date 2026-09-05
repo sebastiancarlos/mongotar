@@ -190,8 +190,8 @@ mongotar src/ config.txt - > my_project.mongotar
   set during deserialization.
 - **Binary Files:** Not designed for binary files. Files with non-UTF-8
   characters will be skipped.
-- **Only UNIX support:** Permissions rely on POSIX standards. Behavior on
-  Windows is undefined regarding permissions.
+- **Cross-platform:** Windows supported, but everything serializes as `rw`
+  (Windows has no concept of executable permissions).
 - **No symlink support:** Symlinks are not supported and will be ignored
   during serialization (with a warning).
 - **Header collision:** The archive format has no escaping (matching `txtar`

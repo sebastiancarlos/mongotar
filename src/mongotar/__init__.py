@@ -1,5 +1,6 @@
 import fnmatch
 import logging
+import os
 import re
 import stat
 import sys
@@ -10,6 +11,8 @@ from typing import TextIO
 from pathspec import GitIgnoreSpec
 
 # --- Constants and Types
+
+IS_WINDOWS = os.name == "nt"
 
 
 class Permission(StrEnum):
@@ -50,6 +53,9 @@ logger = logging.getLogger(__name__)
 
 def _get_permission_mode(item_path: Path) -> Permission:
     """Gets the simplified permission mode ('rw' or 'rwx') for the owner of a file path."""
+    if IS_WINDOWS:
+        # No execute file concept on Windows. Degrade to 'rw'.
+        return Permission.RW
     try:
         st = item_path.stat()
     except OSError as e:
@@ -76,6 +82,9 @@ def _get_permission_mode(item_path: Path) -> Permission:
 
 def _apply_permissions(filepath: Path, permission_mode_str: Permission) -> None:
     """Applies 'rw' or 'rwx' owner permissions to the file"""
+    if IS_WINDOWS:
+        # No permission bits to set; new files are already writable.
+        return
     match permission_mode_str:
         case Permission.RWX:
             target_mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
@@ -370,21 +379,20 @@ def serialize(
 
             before_item_count = len(processed_paths)
 
-            # Determine root like `tar` does:
-            # - Relative paths: root is CWD
-            #   - archive paths will be relative to CWD
-            # - Absolute paths: root is "/"
-            #   - this will result on the leading "/" being stripped on the
-            #     archive path, matching what `tar` does for security on
-            #     extraction.
-            if item.startswith("/"):
-                root_for_item = Path("/")
-                logger.debug(f"Note: Stripping leading '/' from absolute path: '{item}'")
+            # Archive paths are stored relative to a root, like `tar`:
+            # relative inputs relative to CWD, absolute inputs relative
+            # to the filesystem anchor, so the leading `/` or `C:\`
+            # never ends up in the archive.
+            if Path(item).is_absolute():
+                root_dir = Path(Path(item).anchor)
+                logger.debug(
+                    f"Note: Archiving absolute path '{item}' relative to '{Path(item).anchor}'"
+                )
             else:
-                root_for_item = Path.cwd()
+                root_dir = Path.cwd()
 
             # Validate the archive path doesn't traverse outside the root
-            if not abs_item.is_relative_to(root_for_item):
+            if not abs_item.is_relative_to(root_dir):
                 logger.warning(
                     f"Skipping '{item}' as it resolves outside the current working directory."
                 )
@@ -399,7 +407,7 @@ def serialize(
             _serialize_item(
                 abs_item,
                 f,
-                root_dir=root_for_item,
+                root_dir=root_dir,
                 processed_paths=processed_paths,
                 exclude_vcs=exclude_vcs,
                 ignore_specs=seed_specs,
@@ -432,7 +440,7 @@ def deserialize(input_file: str, output_folder: str, force: bool = False) -> boo
 
     # Prevent extraction directly into the filesystem root.
     abs_output_folder = Path(output_folder).resolve()
-    if abs_output_folder == Path("/"):
+    if abs_output_folder == Path(abs_output_folder.anchor):
         logger.error(
             f"Invalid or potentially unsafe output directory specified: '{output_folder}'."
         )
