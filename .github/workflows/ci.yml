@@ -36,11 +36,50 @@ jobs:
       - name: Install project and dev dependencies
         run: uv sync --locked --extra dev
 
-      - name: Run tests
-        run: uv run python test.py
+      - name: Run tests with coverage
+        run: uv run python cover.py --no-report
 
       - name: Lint
         run: uv run ruff check .
 
       - name: Typecheck
         run: uv run pyright
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-data-${{ matrix.os }}
+          path: .coverage
+          if-no-files-found: error
+
+  combine-coverage:
+    name: Combine coverage (all OS)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up uv and Python 3.14
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.14"
+          enable-cache: true
+          cache-python: true
+
+      - name: Install project and dev dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Download coverage data
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-data-*
+          path: coverage-data
+
+      - name: Combine and show total coverage
+        run: |
+          uv run python -m coverage combine --quiet \
+            coverage-data/coverage-data-ubuntu-latest/.coverage \
+            coverage-data/coverage-data-macos-latest/.coverage \
+            coverage-data/coverage-data-windows-latest/.coverage
+          uv run python -m coverage report
