@@ -33,7 +33,7 @@ jobs:
       - name: Run tests, lint, typecheck
         run: |
           uv sync --locked --extra dev
-          uv run python test.py
+          uv run python cover.py
           uv run ruff check .
           uv run pyright
 
