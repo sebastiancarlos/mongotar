@@ -84,3 +84,10 @@ jobs:
             coverage-data/coverage-data-macos-latest/.coverage \
             coverage-data/coverage-data-windows-latest/.coverage
           uv run python -m coverage report
+          uv run python -m coverage xml
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: true
