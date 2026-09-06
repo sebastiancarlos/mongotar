@@ -73,12 +73,12 @@ whole-file output tends to be more reliable.
 
 In short:
 
-| Tool                 | Human readable |   Round-trip | Selective files | AI-friendly |       Permissions | .gitignore |
-| -------------------- | -------------: | -----------: | --------------: | ----------: | ----------------: | ---------: |
-| `tar`                |             ❌ |           ✅ |              ✅ |          ❌ |                ✅ |         ✅ |
-| `txtar`              |             ✅ |           ✅ |         limited |          ✅ |                ❌ |         ❌ |
-| repo-to-prompt tools |             ✅ | generally ❌ |          varies |          ✅ |                ❌ |         ✅ |
-| **`mongotar`**       |         **✅** |       **✅** |          **✅** |      **✅** | **simplified ✅** |     **✅** |
+| Tool                 | Human readable |   Round-trip | Selective files |       Permissions | .gitignore |
+| -------------------- | -------------: | -----------: | --------------: | ----------------: | ---------: |
+| `tar`                |             ❌ |           ✅ |              ✅ |                ✅ |         ✅ |
+| `txtar`              |             ✅ |           ✅ |         limited |                ❌ |         ❌ |
+| repo-to-prompt tools |             ✅ | generally ❌ |          varies |                ❌ |         ✅ |
+| **`mongotar`**       |         **✅** |       **✅** |          **✅** | **simplified ✅** |     **✅** |
 
 ## Some Features
 
