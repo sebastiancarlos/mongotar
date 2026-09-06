@@ -1155,7 +1155,7 @@ class TestMongotarLib(unittest.TestCase):
         (socket_dir / "keep.txt").write_text("keep", encoding="utf-8")
         socket_path = socket_dir / "s"
 
-        sock = socket.socket(socket.AF_UNIX)
+        sock = socket.socket(getattr(socket, "AF_UNIX"))
         sock.bind(str(socket_path))
         try:
             with self.assertLogs(_LOGGER, level=logging.DEBUG) as cm:
