@@ -1147,24 +1147,29 @@ class TestMongotarLib(unittest.TestCase):
 
     def test_unit_serialize_skips_socket_during_traversal(self):
         """A unix domain socket encountered during traversal is skipped."""
-        self._create_file("keep.txt", "keep", "rw")
-        socket_path = self.source_dir / "listen.sock"
+        if IS_WINDOWS:
+            self.skipTest("uv-managed Windows Python has no AF_UNIX socket support")
+
+        socket_dir = self.test_dir / "s"
+        socket_dir.mkdir()
+        (socket_dir / "keep.txt").write_text("keep", encoding="utf-8")
+        socket_path = socket_dir / "s"
 
         sock = socket.socket(socket.AF_UNIX)
         sock.bind(str(socket_path))
         try:
             with self.assertLogs(_LOGGER, level=logging.DEBUG) as cm:
-                result = mongotar_lib.serialize([str(self.source_dir)], str(self.output_mongotar))
+                result = mongotar_lib.serialize([str(socket_dir)], str(self.output_mongotar))
         finally:
             sock.close()
 
         self.assertTrue(result)
         output = "\n".join(cm.output)
         self.assertIn("Skipping non-file/non-directory item:", output)
-        self.assertIn("listen.sock", output)
+        self.assertIn(str(socket_path), output)
         archive = self.output_mongotar.read_text(encoding="utf-8")
         self.assertIn("keep.txt", archive)
-        self.assertNotIn("listen.sock", archive)
+        self.assertNotIn(str(socket_path), archive)
 
     def test_unit_serialize_gitignore_oserror_aborts(self):
         """An OSError reading a traversal .gitignore aborts with the cause."""
